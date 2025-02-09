@@ -1,0 +1,1 @@
+This project is a copy of #02, but using the OpenAI Goland library, instead of standard HTTP library.
