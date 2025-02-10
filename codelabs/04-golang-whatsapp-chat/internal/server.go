@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
 )
 
 type Server struct {
@@ -20,8 +21,16 @@ type Server struct {
 	chatGptApiKey       string
 }
 
+func maskLeft(s string) string {
+	rs := []rune(s)
+	for i := 0; i < len(rs)-4; i++ {
+		rs[i] = '*'
+	}
+	return string(rs)
+}
+
 func NewServer(logger slog.Logger, whatsAppVeriyfToken string, whatsAppApiToken string, chatGptApiKey string) *Server {
-	logger.Info("Creating new server", slog.Any("whatsAppVeriyfToken", whatsAppVeriyfToken), slog.Any("whatsAppApiToken", whatsAppApiToken), slog.Any("chatGptApiKey", chatGptApiKey))
+	logger.Info("Creating new server", slog.Any("whatsAppVerifyToken", maskLeft(whatsAppVeriyfToken)), slog.Any("whatsAppApiToken", maskLeft(whatsAppApiToken)), slog.Any("chatGptApiKey", maskLeft(chatGptApiKey)))
 	return &Server{
 		logger:              logger,
 		whatsAppVeriyfToken: whatsAppVeriyfToken,
@@ -63,7 +72,7 @@ func (s *Server) HandleMessage(c echo.Context) error {
 		for _, change := range entry.Changes {
 			for _, message := range change.Value.Messages {
 				if message.Text != nil {
-					s.logger.Info("Received message", slog.Any("message", message))
+					s.logger.Info("Received WhatsApp message", slog.Any("message", message))
 					go s.respondToMessage(message)
 				}
 			}
@@ -81,7 +90,7 @@ func (s *Server) respondToMessage(message model.Message) {
 
 	chatCompletion, err := client.Chat.Completions.New(context.TODO(), openai.ChatCompletionNewParams{
 		Messages: openai.F([]openai.ChatCompletionMessageParamUnion{
-			openai.SystemMessage("You are a comedian that responds to every message with a short joke that is related to the topic of the message you got."),
+			openai.SystemMessage("You are a thoughtful comedian that always responds to everything with a joke that is related to the topic of the message you got. If you can't determine what is the topic of the conversation, make one up using the current time of the day as a starting point."),
 			openai.UserMessage(message.Text.Body),
 		}),
 		Model: openai.F(openai.ChatModelGPT3_5Turbo),
@@ -90,13 +99,12 @@ func (s *Server) respondToMessage(message model.Message) {
 		s.logger.Error("failed to make req to chat gpt api", slog.Any("err", err))
 		return
 	}
-	s.logger.Info("Sent message", slog.Any("response", chatCompletion.Choices[0].Message.Content))
 	err = s.sendWhatsAppMessage(message.From, chatCompletion.Choices[0].Message.Content)
 	if err != nil {
 		s.logger.Error("failed to send message back to user", slog.Any("err", err))
 		return
 	}
-	s.logger.Info("Sent message", slog.Any("response", chatCompletion.Choices[0].Message.Content))
+	s.logger.Info("Responded to Message Successfully")
 }
 
 func (s *Server) sendWhatsAppMessage(to string, message string) error {
@@ -108,20 +116,33 @@ func (s *Server) sendWhatsAppMessage(to string, message string) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+
+	dump, err := httputil.DumpRequest(req, true)
+	if err != nil {
+		s.logger.Error(fmt.Sprintf("Error dumping request: %v", err))
+	}
+	s.logger.Info("Sending WhatsApp message", slog.Any("request", string(dump)))
+
+	// Set the Authorization header after the log statement to avoid logging the token
 	req.Header.Set("Authorization", "Bearer "+s.whatsAppApiToken)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to make req to chat gpt api: %w", err)
+		return fmt.Errorf("failed post message to WhatsApp API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read response body from WhatsApp API: %s, %w", resp.Status, err)
 	}
-	s.logger.Info("Sent message", slog.Any("response", string(body)))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to send message to WhatsApp API: %s, %s", resp.Status, string(body))
+	}
+
+	s.logger.Info("Sent WhatsApp message", slog.Any("response", string(body)))
 
 	return nil
 }
